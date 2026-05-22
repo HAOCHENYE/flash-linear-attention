@@ -106,16 +106,21 @@ def assert_close(prefix, ref, tri, ratio, warning=False, err_atol=1e-6):
         assert error_rate < ratio, msg
 
 
+from collections import deque
+
+
 def tensor_cache(
     fn: Callable[..., torch.Tensor],
 ) -> Callable[..., torch.Tensor]:
     """
-    A decorator that caches the most recent result of a function with tensor inputs.
+    A decorator that caches the most recent results of a function with tensor inputs.
 
-    This decorator will store the output of the decorated function for the most recent set of input tensors.
-    If the function is called again with the same input tensors, it will return the cached result.
 
     If FLA_DISABLE_TENSOR_CACHE environment variable is set to '1', caching is disabled.
+
+    The decorator keeps a bounded queue of the last ``_TENSOR_CACHE_MAXLEN`` (args, kwargs, result)
+    triples. If an incoming call matches any cached entry (via ``is`` identity on tensor inputs),
+    the cached result is returned and ``fn`` is skipped.
 
     Args:
         fn (Callable[..., torch.Tensor]):
@@ -123,31 +128,29 @@ def tensor_cache(
 
     Returns:
         Callable[..., torch.Tensor]:
-            A wrapped version of the input function with single-entry caching.
+            A wrapped version of the input function backed by a length-2 cache queue.
     """
-    last_args: tuple | None = None
-    last_kwargs: dict | None = None
-    last_result: Any = None
+    last_args: deque = deque(maxlen=4)
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        nonlocal last_args, last_kwargs, last_result
-
         # Skip cache if FLA_DISABLE_TENSOR_CACHE is set
         if FLA_DISABLE_TENSOR_CACHE:
             return fn(*args, **kwargs)
 
-        if last_args is not None and last_kwargs is not None:
-            if len(args) == len(last_args) and len(kwargs) == len(last_kwargs):
-                if all(a is b for a, b in zip(args, last_args, strict=False)) and \
-                        all(k in last_kwargs and v is last_kwargs[k] for k, v in kwargs.items()):
-                    return last_result
+        for cached_args, cached_kwargs, cached_result in last_args:
+            if len(args) != len(cached_args) or len(kwargs) != len(cached_kwargs):
+                continue
+            if all(a is b for a, b in zip(args, cached_args, strict=False)) and \
+                    all(k in cached_kwargs and v is cached_kwargs[k] for k, v in kwargs.items()):
+                return cached_result
 
         result = fn(*args, **kwargs)
-        last_args, last_kwargs, last_result = args, kwargs, result
+        last_args.append((args, kwargs, result))
         return result
 
     return wrapper
+
 
 
 def input_guard(
